@@ -13,9 +13,6 @@ const API_CONFIG = {
   retryDelays: [1000, 2000, 4000], // Progressive delays
   endpoints: [
     'https://app.circle.so/api/admin/v2/community_members',
-    'https://app.circle.so/api/v1/communities/{communityId}/members',
-    'https://api.circle.so/api/v1/communities/{communityId}/members',
-    'https://circle.so/api/v1/communities/{communityId}/members',
   ],
 } as const;
 
