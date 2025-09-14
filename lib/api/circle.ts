@@ -4,15 +4,25 @@
  */
 
 import { cache } from 'react';
-import { BrokerDetail, SummaryStats, CircleApiError, DetailedError } from '@/types/circle';
+import { BrokerDetail, SummaryStats, InvitationLink, CircleApiError, DetailedError } from '@/types/circle';
 
-// API Configuration
+// API Configuration based on Circle.so Admin API V2 documentation
+// Reference: https://api-headless.circle.so/?urls.primaryName=Admin+API+V2
 const API_CONFIG = {
   timeout: 30000,
   maxRetries: 3,
   retryDelays: [1000, 2000, 4000], // Progressive delays
-  endpoints: [
-    'https://app.circle.so/api/admin/v2/community_members',
+  baseUrl: 'https://app.circle.so/api/admin/v2',
+  endpoints: {
+    members: '/community_members',
+    invitationLinks: '/invitation_links',
+    invitations: '/invitations', // Additional endpoint that might contain relationships
+  },
+  // Try different parameter combinations based on API V2 documentation
+  parameterSets: [
+    { per_page: '10' }, // Basic
+    { per_page: '10', include: 'invitation_link,invited_by' }, // With includes
+    { per_page: '10', fields: 'id,name,email,invitation_link_id,invited_by_id' }, // Specific fields
   ],
 } as const;
 
@@ -100,12 +110,28 @@ function createHeaders(apiKey: string): HeadersInit {
 }
 
 /**
- * Build endpoint URLs with community ID replacement
+ * Build endpoint URLs with different parameter sets
  */
 function buildEndpoints(communityId: string): string[] {
-  return API_CONFIG.endpoints.map(endpoint => 
-    endpoint.replace('{communityId}', communityId)
-  ).map(endpoint => `${endpoint}?per_page=100`);
+  const endpoints: string[] = [];
+  
+  // Try different parameter combinations
+  for (const params of API_CONFIG.parameterSets) {
+    const queryString = new URLSearchParams(params as any).toString();
+    endpoints.push(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.members}?${queryString}`);
+    endpoints.push(`${API_CONFIG.baseUrl}${API_CONFIG.endpoints.invitationLinks}?${queryString}`);
+  }
+  
+  return endpoints;
+}
+
+/**
+ * Build specific endpoint URL with parameters
+ */
+function buildEndpoint(endpointType: keyof typeof API_CONFIG.endpoints, communityId: string, params: Record<string, string> = {}): string {
+  const endpoint = API_CONFIG.endpoints[endpointType];
+  const queryString = new URLSearchParams({ per_page: '10', ...params }).toString();
+  return `${API_CONFIG.baseUrl}${endpoint}?${queryString}`;
 }
 
 /**
@@ -248,12 +274,29 @@ async function fetchAllPages(
 ): Promise<any[]> {
   let allRecords = initialData.records || initialData.members || initialData.community_members || initialData.data || [];
 
-  // Check if there are more pages
+  // Debug: Log the actual API response structure
+  console.log('🔍 API Response structure:', {
+    has_next_page: initialData.has_next_page,
+    page_count: initialData.page_count,
+    count: initialData.count,
+    records_length: (initialData.records || []).length,
+    members_length: (initialData.members || []).length,
+    community_members_length: (initialData.community_members || []).length,
+    data_length: (initialData.data || []).length
+  });
+
+  // Check if there are more pages - be more conservative
   if (initialData.has_next_page && initialData.page_count && initialData.page_count > 1) {
     console.log(`📄 Fetching ${initialData.page_count} total pages (${initialData.count} total records)`);
 
+    let consecutiveEmptyPages = 0;
+    const maxConsecutiveEmptyPages = 3; // Stop after 3 consecutive empty pages
+    const maxPagesToFetch = Math.min(initialData.page_count, 20); // Limit to max 20 pages for safety
+
+    console.log(`📄 Will fetch up to ${maxPagesToFetch} pages (API says ${initialData.page_count} total)`);
+
     // Fetch remaining pages
-    for (let page = 2; page <= initialData.page_count; page++) {
+    for (let page = 2; page <= maxPagesToFetch; page++) {
       try {
         const separator = endpoint.includes('?') ? '&' : '?';
         const pageUrl = `${endpoint}${separator}page=${page}`;
@@ -262,13 +305,40 @@ async function fetchAllPages(
         
         if (result.success) {
           const pageRecords = result.data.records || result.data.members || result.data.community_members || result.data.data || [];
-          allRecords = [...allRecords, ...pageRecords];
-          console.log(`✅ Page ${page}/${initialData.page_count} fetched: ${pageRecords.length} records`);
+          
+          if (pageRecords.length === 0) {
+            consecutiveEmptyPages++;
+            console.log(`✅ Page ${page}/${initialData.page_count} fetched: ${pageRecords.length} records (empty)`);
+            
+            // Stop if we've hit too many consecutive empty pages
+            if (consecutiveEmptyPages >= maxConsecutiveEmptyPages) {
+              console.log(`🛑 Stopping pagination after ${consecutiveEmptyPages} consecutive empty pages`);
+              break;
+            }
+          } else {
+            consecutiveEmptyPages = 0; // Reset counter when we get data
+            allRecords = [...allRecords, ...pageRecords];
+            console.log(`✅ Page ${page}/${initialData.page_count} fetched: ${pageRecords.length} records`);
+          }
         } else {
           console.warn(`⚠️ Failed to fetch page ${page}: ${result.error.message}`);
+          consecutiveEmptyPages++;
+          
+          // Stop if we've hit too many consecutive failures
+          if (consecutiveEmptyPages >= maxConsecutiveEmptyPages) {
+            console.log(`🛑 Stopping pagination after ${consecutiveEmptyPages} consecutive failures`);
+            break;
+          }
         }
       } catch (error) {
         console.error(`❌ Error fetching page ${page}:`, error);
+        consecutiveEmptyPages++;
+        
+        // Stop if we've hit too many consecutive errors
+        if (consecutiveEmptyPages >= maxConsecutiveEmptyPages) {
+          console.log(`🛑 Stopping pagination after ${consecutiveEmptyPages} consecutive errors`);
+          break;
+        }
       }
     }
   }
@@ -277,9 +347,95 @@ async function fetchAllPages(
 }
 
 /**
+ * Process raw invitation links data
+ */
+function processInvitationLinks(invitationLinks: any[], members: any[] = []): InvitationLink[] {
+  // Debug: Log sample invitation link structure to understand available fields
+  if (invitationLinks.length > 0) {
+    console.log('🔍 Sample invitation link structure:', {
+      id: invitationLinks[0].id,
+      url: invitationLinks[0].url,
+      availableFields: Object.keys(invitationLinks[0]),
+      memberFields: {
+        members: invitationLinks[0].members,
+        joined_members: invitationLinks[0].joined_members,
+        users: invitationLinks[0].users,
+        invited_users: invitationLinks[0].invited_users,
+        usage_count: invitationLinks[0].usage_count,
+        used_count: invitationLinks[0].used_count,
+      }
+    });
+  }
+
+  return invitationLinks.map((link: any) => {
+    const linkId = String(link.id);
+    
+    // Check if the invitation link itself contains member data
+    let joinedMembers: any[] = [];
+    
+    // Try different possible field names for members in invitation link data
+    const possibleMemberFields = [
+      link.members,
+      link.joined_members, 
+      link.users,
+      link.invited_users,
+      link.used_by,
+      link.used_by_users
+    ];
+    
+    for (const memberField of possibleMemberFields) {
+      if (memberField && Array.isArray(memberField) && memberField.length > 0) {
+        console.log(`✅ Found members in invitation link ${linkId} in field:`, Object.keys(link).find(key => link[key] === memberField));
+        joinedMembers = memberField.map((member: any) => ({
+          id: String(member.id || member.user_id),
+          name: member.name || member.display_name || `${member.first_name || ''} ${member.last_name || ''}`.trim() || 'Unknown',
+          email: member.email || '',
+          created_at: member.created_at || member.joined_at || member.used_at || '',
+          invited_by: member.invited_by ? {
+            id: String(member.invited_by.id),
+            name: member.invited_by.name || member.invited_by.display_name || '',
+            email: member.invited_by.email || '',
+          } : null,
+          invitation_link: {
+            id: linkId,
+            url: link.url || link.invitation_url || '',
+            name: link.name || link.title || '',
+          },
+        }));
+        break;
+      }
+    }
+    
+    // If no members found in invitation link data, try to match by other criteria
+    if (joinedMembers.length === 0) {
+      console.log(`⚠️ No members found in invitation link ${linkId} data. Available fields:`, Object.keys(link));
+      
+      // For now, create empty array - we'll need to investigate the API further
+      joinedMembers = [];
+    }
+    
+    return {
+      id: linkId,
+      url: link.url || link.invitation_url || '',
+      created_at: link.created_at || link.createdAt || '',
+      created_by: link.created_by ? {
+        id: String(link.created_by.id),
+        name: link.created_by.name || link.created_by.display_name || '',
+        email: link.created_by.email || '',
+      } : undefined,
+      expires_at: link.expires_at || link.expiresAt,
+      is_active: link.is_active !== undefined ? link.is_active : link.active !== undefined ? link.active : true,
+      usage_count: link.usage_count || link.used_count || joinedMembers.length,
+      max_uses: link.max_uses || link.maxUses,
+      joined_members: joinedMembers,
+    };
+  });
+}
+
+/**
  * Process raw member data into broker statistics
  */
-function processBrokerStats(members: any[]): SummaryStats {
+function processBrokerStats(members: any[], invitationLinks: any[] = []): SummaryStats {
   const brokerMap = new Map<string, { name: string; count: number }>();
 
   members.forEach((member: any) => {
@@ -322,10 +478,14 @@ function processBrokerStats(members: any[]): SummaryStats {
     }))
     .sort((a, b) => b.referredCount - a.referredCount);
 
+  const processedInvitationLinks = processInvitationLinks(invitationLinks, members);
+
   return {
     totalMembers: members.length,
     totalBrokers: brokerMap.size,
+    totalInvitationLinks: processedInvitationLinks.length,
     brokerDetails,
+    invitationLinks: processedInvitationLinks,
   };
 }
 
@@ -343,63 +503,103 @@ export async function fetchCircleMembers(options: FetchOptions = {}): Promise<{
   try {
     const { apiKey, communityId } = getCredentials();
     const headers = createHeaders(apiKey);
-    const endpoints = buildEndpoints(communityId);
 
     console.log('🚀 Starting Circle.so API fetch...');
     console.log(`🔑 API Key: ${apiKey.substring(0, 8)}...`);
     console.log(`🏠 Community ID: ${communityId}`);
 
-    // Try each endpoint until one works
-    for (const endpoint of endpoints) {
-      console.log(`🔄 Testing endpoint: ${endpoint}`);
-
-      const result = await fetchFromEndpoint(endpoint, headers, options);
-
-      if (result.success) {
-        const data = result.data as CircleApiResponse;
+    // Try different API approaches based on Circle.so V2 documentation
+    console.log('🔄 Trying different API approaches based on Circle.so V2 documentation...');
+    
+    let membersResult: any = { success: false };
+    let invitationLinksResult: any = { success: false };
+    
+    // Try different parameter combinations
+    for (const params of API_CONFIG.parameterSets) {
+      console.log(`🔄 Trying parameters:`, params);
+      
+      // Try members endpoint with different parameters
+      if (!membersResult.success) {
+        const membersEndpoint = buildEndpoint('members', communityId, params);
+        console.log(`🔄 Fetching members from: ${membersEndpoint}`);
+        membersResult = await fetchFromEndpoint(membersEndpoint, headers, options);
         
-        // Fetch all pages if paginated
-        const allMembers = await fetchAllPages(data, endpoint, headers, options);
-        
-        if (allMembers.length === 0) {
-          console.warn(`⚠️ Endpoint returned empty members list: ${endpoint}`);
-          continue;
-        }
-
-        console.log(`👥 Found ${allMembers.length} total members`);
-        
-        // Process broker statistics
-        const stats = processBrokerStats(allMembers);
-        
-        console.log(`📈 Final stats:`, {
-          totalMembers: stats.totalMembers,
-          totalBrokers: stats.totalBrokers,
-          topBroker: stats.brokerDetails[0]?.brokerName || 'None'
-        });
-
-        return {
-          success: true,
-          data: stats,
-          endpoint,
-        };
-      } else {
-        console.log(`❌ Endpoint failed: ${result.error.message}`);
-        
-        // If it's a non-retryable error, return it immediately
-        if (result.error.type === 'INVALID_CREDENTIALS' || result.error.type === 'CLOUDFLARE_BLOCKED') {
-          return {
-            success: false,
-            error: result.error.toDetailedError(),
-          };
+        if (membersResult.success) {
+          console.log(`✅ Members endpoint successful with params:`, params);
         }
       }
+      
+      // Try invitation links endpoint with different parameters
+      if (!invitationLinksResult.success) {
+        const invitationLinksEndpoint = buildEndpoint('invitationLinks', communityId, params);
+        console.log(`🔄 Fetching invitation links from: ${invitationLinksEndpoint}`);
+        invitationLinksResult = await fetchFromEndpoint(invitationLinksEndpoint, headers, options);
+        
+        if (invitationLinksResult.success) {
+          console.log(`✅ Invitation links endpoint successful with params:`, params);
+        }
+      }
+      
+      // If both are successful, break
+      if (membersResult.success && invitationLinksResult.success) {
+        break;
+      }
+    }
+    
+    if (!membersResult.success) {
+      console.log(`❌ Members endpoint failed: ${membersResult.error.message}`);
+      
+      // If it's a non-retryable error, return it immediately
+      if (membersResult.error.type === 'INVALID_CREDENTIALS' || membersResult.error.type === 'CLOUDFLARE_BLOCKED') {
+        return {
+          success: false,
+          error: membersResult.error.toDetailedError(),
+        };
+      }
+      
+      // For other errors, try to continue with empty members
+      console.warn('⚠️ Continuing with empty members data');
     }
 
-    // All endpoints failed
-    throw new CircleApiException(
-      'NETWORK_ERROR',
-      'All API endpoints failed. This could be due to: 1) Incorrect API key/community ID, 2) API permissions, 3) Cloudflare blocking, or 4) API endpoint changes.'
-    );
+    let successfulMembersEndpoint = '';
+    let successfulInvitationLinksEndpoint = '';
+    
+    let allMembers: any[] = [];
+    if (membersResult.success) {
+      const membersData = membersResult.data as CircleApiResponse;
+      // Use the successful endpoint from the loop
+      successfulMembersEndpoint = buildEndpoint('members', communityId, API_CONFIG.parameterSets[0]);
+      allMembers = await fetchAllPages(membersData, successfulMembersEndpoint, headers, options);
+      console.log(`👥 Found ${allMembers.length} total members`);
+    }
+    
+    let allInvitationLinks: any[] = [];
+    if (invitationLinksResult.success) {
+      const invitationLinksData = invitationLinksResult.data as CircleApiResponse;
+      // Use the successful endpoint from the loop
+      successfulInvitationLinksEndpoint = buildEndpoint('invitationLinks', communityId, API_CONFIG.parameterSets[0]);
+      allInvitationLinks = await fetchAllPages(invitationLinksData, successfulInvitationLinksEndpoint, headers, options);
+      console.log(`🔗 Found ${allInvitationLinks.length} total invitation links`);
+    } else {
+      console.log(`❌ Invitation links endpoint failed: ${invitationLinksResult.error.message}`);
+      console.warn('⚠️ Continuing with empty invitation links data');
+    }
+
+    // Process combined statistics
+    const stats = processBrokerStats(allMembers, allInvitationLinks);
+    
+    console.log(`📈 Final stats:`, {
+      totalMembers: stats.totalMembers,
+      totalBrokers: stats.totalBrokers,
+      totalInvitationLinks: stats.totalInvitationLinks,
+      topBroker: stats.brokerDetails[0]?.brokerName || 'None'
+    });
+
+    return {
+      success: true,
+      data: stats,
+      endpoint: `Members: ${successfulMembersEndpoint} + Invitation Links: ${successfulInvitationLinksEndpoint}`,
+    };
 
   } catch (error) {
     if (error instanceof CircleApiException) {
@@ -442,7 +642,12 @@ export const testCircleConnection = cache(async (options: FetchOptions = {}): Pr
   try {
     const { apiKey, communityId } = getCredentials();
     const headers = createHeaders(apiKey);
-    const endpoints = buildEndpoints(communityId).slice(0, 3); // Test first 3 endpoints
+    
+    // Test both endpoints
+    const endpoints = [
+      buildEndpoint('members', communityId),
+      buildEndpoint('invitationLinks', communityId),
+    ];
 
     const results = [];
 
@@ -503,6 +708,69 @@ export const testCircleConnection = cache(async (options: FetchOptions = {}): Pr
     };
   }
 });
+
+/**
+ * Get detailed invitation link statistics with member details
+ */
+export async function getInvitationLinkStats(options: FetchOptions = {}): Promise<{
+  success: true;
+  data: {
+    invitationLinks: InvitationLink[];
+    totalLinks: number;
+    totalMembersThroughLinks: number;
+    topPerformingLinks: Array<{
+      link: InvitationLink;
+      memberCount: number;
+    }>;
+  };
+} | {
+  success: false;
+  error: DetailedError;
+}> {
+  try {
+    const result = await fetchCircleMembers(options);
+    
+    if (!result.success) {
+      return result;
+    }
+
+    const { invitationLinks } = result.data;
+    
+    // Calculate statistics
+    const totalMembersThroughLinks = invitationLinks.reduce(
+      (total, link) => total + (link.joined_members?.length || 0), 
+      0
+    );
+
+    const topPerformingLinks = invitationLinks
+      .map(link => ({
+        link,
+        memberCount: link.joined_members?.length || 0,
+      }))
+      .sort((a, b) => b.memberCount - a.memberCount)
+      .slice(0, 10); // Top 10 performing links
+
+    return {
+      success: true,
+      data: {
+        invitationLinks,
+        totalLinks: invitationLinks.length,
+        totalMembersThroughLinks,
+        topPerformingLinks,
+      },
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: {
+        type: 'UNKNOWN_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to get invitation link stats',
+        details: { originalError: error },
+        timestamp: new Date(),
+      },
+    };
+  }
+}
 
 /**
  * Get cached member data (for client-side usage)

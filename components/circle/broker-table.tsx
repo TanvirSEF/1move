@@ -37,7 +37,7 @@ export function BrokerTable({
 
   // Filter and sort brokers
   const processedBrokers = useMemo(() => {
-    let filtered = brokers.filter(broker =>
+    const filtered = brokers.filter(broker =>
       broker.brokerName.toLowerCase().includes(searchTerm.toLowerCase())
     );
 

@@ -11,19 +11,24 @@ import { CircleStatsCard } from '@/components/circle/circle-stats-card';
 import { CircleErrorDisplay } from '@/components/circle/circle-error-display';
 import { BrokerTable } from '@/components/circle/broker-table';
 import { CircleControlPanel } from '@/components/circle/circle-control-panel';
+import { InvitationLinksDebug } from '@/components/invitation-links-debug';
+import { RawDataDebug } from '@/components/raw-data-debug';
+import InvitationLinksSummary from '@/components/invitation-links-summary';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { SummaryStats } from '@/types/circle';
 
 interface DashboardClientProps {
   // Optional initial data from server-side rendering
   initialData?: {
-    data: any;
+    data: SummaryStats;
     endpoint: string;
     timestamp: number;
   } | null;
 }
 
 export function DashboardClient({ initialData }: DashboardClientProps) {
+  // initialData is reserved for future SSR implementation
   const {
     data: stats,
     error,
@@ -114,6 +119,30 @@ export function DashboardClient({ initialData }: DashboardClientProps) {
             </div>
           )}
 
+          {/* Raw Data Debug */}
+          {stats && (
+            <div className="px-4 lg:px-6">
+              <RawDataDebug />
+            </div>
+          )}
+
+          {/* Invitation Links Summary */}
+          {stats && stats.invitationLinks && stats.invitationLinks.length > 0 && (
+            <div className="px-4 lg:px-6">
+              <InvitationLinksSummary 
+                invitationLinks={stats.invitationLinks}
+                totalMembers={stats.totalMembers}
+              />
+            </div>
+          )}
+
+          {/* Invitation Links Debug */}
+          {stats && (
+            <div className="px-4 lg:px-6">
+              <InvitationLinksDebug />
+            </div>
+          )}
+
           {/* No Data State */}
           {!isLoading && !hasData && !hasError && (
             <div className="px-4 lg:px-6">
@@ -123,7 +152,7 @@ export function DashboardClient({ initialData }: DashboardClientProps) {
                   <div className="space-y-2">
                     <h3 className="text-xl font-semibold">Welcome to Circle.so Analytics</h3>
                     <p className="text-muted-foreground max-w-md mx-auto">
-                      Click "Refresh Data" to load your member statistics and broker analytics.
+                      Click &quot;Refresh Data&quot; to load your member statistics and broker analytics.
                     </p>
                   </div>
                   <Button onClick={refresh} disabled={isLoading}>

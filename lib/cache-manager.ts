@@ -9,6 +9,15 @@ export interface CacheEntry<T> {
   version: string;
 }
 
+export interface CacheEntryMeta {
+  timestamp: number;
+  expiresAt: number;
+  source: 'api' | 'manual' | 'fallback';
+  version: string;
+  isExpired: boolean;
+  age: number;
+}
+
 export interface CacheOptions {
   ttl?: number; // Time to live in milliseconds
   maxAge?: number; // Maximum age before considering stale
@@ -79,7 +88,7 @@ export class CacheManager {
   }
 
   // Get data with metadata
-  public getWithMeta<T>(key: string): { data: T; meta: Omit<CacheEntry<T>, 'data'> } | null {
+  public getWithMeta<T>(key: string): { data: T; meta: CacheEntryMeta } | null {
     const entry = this.cache.get(key) as CacheEntry<T> | undefined;
     
     if (!entry) {
@@ -89,14 +98,14 @@ export class CacheManager {
     const now = Date.now();
     
     // Return even if expired, but mark it in metadata
-    const { data, ...meta } = entry;
+    const { data, ...baseMeta } = entry;
     return {
       data,
       meta: {
-        ...meta,
+        ...baseMeta,
         isExpired: now > entry.expiresAt,
         age: now - entry.timestamp
-      } as any
+      }
     };
   }
 
@@ -265,6 +274,8 @@ export const CACHE_KEYS = {
   MEMBERS: 'circle-members',
   STATS: 'circle-stats',
   BROKERS: 'circle-brokers',
+  INVITATION_LINKS: 'circle-invitation-links',
+  INVITATION_LINK_STATS: 'circle-invitation-link-stats',
   CONNECTION_TEST: 'circle-connection-test',
   MANUAL_DATA: 'circle-manual-data'
 } as const;
@@ -322,6 +333,33 @@ export const cacheUtils = {
       totalCacheSize: stats.totalSize,
       totalEntries: stats.totalEntries
     };
+  },
+
+  // Get cached invitation link data
+  getInvitationLinkData: (): any => {
+    const cache = CacheManager.getInstance();
+    
+    // Try to get fresh API data first
+    let data = cache.get(CACHE_KEYS.INVITATION_LINK_STATS);
+    if (data) {
+      return { data, source: 'api-cache', isFresh: true };
+    }
+
+    // Try to get stale API data
+    data = cache.getStale(CACHE_KEYS.INVITATION_LINK_STATS);
+    if (data) {
+      return { data, source: 'api-cache', isFresh: false };
+    }
+
+    return null;
+  },
+
+  // Store invitation link data
+  storeInvitationLinkData: (data: any, source: 'api' | 'manual' = 'api'): void => {
+    const cache = CacheManager.getInstance();
+    const ttl = source === 'manual' ? 24 * 60 * 60 * 1000 : 5 * 60 * 1000; // Manual data lasts 24h
+    
+    cache.set(CACHE_KEYS.INVITATION_LINK_STATS, data, { source, ttl });
   },
 
   // Clear all Circle.so related cache

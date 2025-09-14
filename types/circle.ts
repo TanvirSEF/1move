@@ -11,6 +11,12 @@ export interface Member {
     name: string;
     email: string;
   } | null;
+  // Invitation link used to join
+  invitation_link?: {
+    id: string;
+    url: string;
+    name?: string;
+  };
 }
 
 export interface BrokerDetail {
@@ -19,10 +25,29 @@ export interface BrokerDetail {
   referredCount: number;
 }
 
+export interface InvitationLink {
+  id: string;
+  url: string;
+  created_at: string;
+  created_by?: {
+    id: string;
+    name: string;
+    email: string;
+  };
+  expires_at?: string;
+  is_active?: boolean;
+  usage_count?: number;
+  max_uses?: number;
+  // Members who joined through this invitation link
+  joined_members?: Member[];
+}
+
 export interface SummaryStats {
   totalMembers: number;
   totalBrokers: number;
+  totalInvitationLinks: number;
   brokerDetails: BrokerDetail[];
+  invitationLinks: InvitationLink[];
 }
 
 export interface CircleApiResponse {
@@ -186,15 +211,4 @@ export interface BrokerChartData {
   percentage: number;
 }
 
-// Export all types as a namespace for easier imports
-export namespace CircleTypes {
-  export type Member = Member;
-  export type BrokerDetail = BrokerDetail;
-  export type SummaryStats = SummaryStats;
-  export type CircleApiResponse = CircleApiResponse;
-  export type ServerActionResult<T = any> = ServerActionResult<T>;
-  export type ConnectionTestResult = ConnectionTestResult;
-  export type ApiResponse<T> = ApiResponse<T>;
-  export type CircleApiError = CircleApiError;
-  export type DetailedError = DetailedError;
-}
+// All types are already exported above
